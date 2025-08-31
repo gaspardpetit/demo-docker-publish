@@ -99,7 +99,7 @@ jobs:
           echo "Computed VERSION_PYTHON=${VERSION_PYTHON}"
 
       - name: Extract Docker metadata ( ${{ matrix.variant.name }} )
-        id: dmeta
+        id: docker-metadata
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
@@ -119,8 +119,8 @@ jobs:
           context: .
           file: ${{ matrix.variant.dockerfile }}
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.dmeta.outputs.tags }}
-          labels: ${{ steps.dmeta.outputs.labels }}
+          tags: ${{ steps.docker-metadata.outputs.tags }}
+          labels: ${{ steps.docker-metadata.outputs.labels }}
           platforms: ${{ matrix.variant.platforms }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -134,7 +134,7 @@ jobs:
         if: ${{ github.event_name != 'pull_request' }}
         env:
           DIGEST: ${{ steps.build-and-push.outputs.digest }}
-          TAGS: ${{ steps.docker_meta.outputs.tags }}
+          TAGS: ${{ steps.docker-metadata.outputs.tags }}
         run: |
           images=""
           for tag in ${TAGS}; do
