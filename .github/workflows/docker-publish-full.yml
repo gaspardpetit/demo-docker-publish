@@ -133,6 +133,11 @@ jobs:
       - name: Sign the published Docker image ( ${{ matrix.variant.name }} )
         if: ${{ github.event_name != 'pull_request' }}
         env:
-          TAGS: ${{ steps.dmeta.outputs.tags }}
           DIGEST: ${{ steps.build-and-push.outputs.digest }}
-        run: echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
+          TAGS: ${{ steps.docker_meta.outputs.tags }}
+        run: |
+          images=""
+          for tag in ${TAGS}; do
+            images+="${tag}@${DIGEST} "
+          done
+          cosign sign --yes ${images}
