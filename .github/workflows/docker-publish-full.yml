@@ -1,0 +1,138 @@
+name: Docker Publish - full
+
+on:
+  schedule:
+    # At 02:28 on day-of-month 15.
+    - cron: '28 2 15 * *'
+  push:
+    # Run on main branch pushes.
+    branches: [ "main" ]
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    # Run on main branch PRs.
+    branches: [ "main" ]
+
+env:
+    # Use docker.io for Docker Hub if empty
+    REGISTRY: ghcr.io
+    # github.repository as <account>/<repo>
+    IMAGE_NAME: ${{ github.repository }}-matrix
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60 # kill if it takes more than an hour
+    permissions:
+      contents: read
+      packages: write # <-- important
+
+    strategy:
+      matrix:
+        variant:
+          - name: main
+            suffix: ""
+            dockerfile: Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: variant
+            suffix: "-variant"
+            dockerfile: Dockerfile # could be different
+            platforms: linux/amd64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into registry ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute version metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse --short HEAD)
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+            DESCRIBE="${GITHUB_REF_NAME}"
+            # strip leading v for python version (e.g. v1.2.3 -> 1.2.3)
+            VERSION_PYTHON="${GITHUB_REF_NAME#v}"
+          else
+            DESCRIBE="$(git describe --tags --always --dirty)"
+            VERSION="${DESCRIBE}"
+            # PEP 440: v1.2.3-4-gHASH[-dirty] => 1.2.3.post4[.dev0]
+            VERSION_PYTHON="$(git describe --tags --always --dirty \
+              | sed -E 's/^v//; s/-([0-9]+)-g[0-9a-f]+(-dirty)?$/.post\1\2/; s/-dirty$/.dev0/')"
+          fi
+      
+          # Drop any local version (+foo) if present
+          VERSION_PYTHON="${VERSION_PYTHON%%+*}"
+      
+          echo "version=${VERSION}"           >> "$GITHUB_OUTPUT"
+          echo "version_python=${VERSION_PYTHON}" >> "$GITHUB_OUTPUT"
+          echo "describe=${DESCRIBE}"         >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}"                   >> "$GITHUB_OUTPUT"
+          echo "date=${DATE}"                 >> "$GITHUB_OUTPUT"
+      
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            MAJOR="${BASH_REMATCH[1]}"; MINOR="${BASH_REMATCH[2]}"; PATCH="${BASH_REMATCH[3]}"
+            echo "major=${MAJOR}" >> "$GITHUB_OUTPUT"
+            echo "minor=${MINOR}" >> "$GITHUB_OUTPUT"
+            echo "patch=${PATCH}" >> "$GITHUB_OUTPUT"
+            echo "is_clean_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_clean_release=false" >> "$GITHUB_OUTPUT"
+          fi
+      
+          echo "Computed VERSION_PYTHON=${VERSION_PYTHON}"
+
+      - name: Extract Docker metadata ( ${{ matrix.variant.name }} )
+        id: dmeta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ matrix.variant.tag_prefix }}sha-${{ steps.metadata.outputs.sha }}
+            type=raw,value=${{ matrix.variant.tag_prefix }}main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ matrix.variant.tag_prefix }}desc-${{ steps.metadata.outputs.describe }},enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ matrix.variant.tag_prefix }}${{ github.ref_name }},enable=${{ steps.metadata.outputs.is_clean_release == 'true' }}
+            type=raw,value=${{ matrix.variant.tag_prefix }}v${{ steps.metadata.outputs.major }}.${{ steps.metadata.outputs.minor }},enable=${{ steps.metadata.outputs.is_clean_release == 'true' }}
+            type=raw,value=${{ matrix.variant.tag_prefix }}v${{ steps.metadata.outputs.major }},enable=${{ steps.metadata.outputs.is_clean_release == 'true' }}
+            type=raw,value=${{ matrix.variant.tag_prefix }}latest,enable=${{ steps.metadata.outputs.is_clean_release == 'true' }}
+
+      - name: Build and push Docker image ( ${{ matrix.variant.name }} )
+        id: build-and-push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.variant.dockerfile }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.dmeta.outputs.tags }}
+          labels: ${{ steps.dmeta.outputs.labels }}
+          platforms: ${{ matrix.variant.platforms }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            PYVERSION=${{ steps.metadata.outputs.version_python }}
+            VERSION=${{ steps.metadata.outputs.version }}
+            GIT_SHA=${{ steps.metadata.outputs.sha }}
+            BUILD_DATE=${{ steps.metadata.outputs.date }}
+
+      - name: Sign the published Docker image ( ${{ matrix.variant.name }} )
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          TAGS: ${{ steps.dmeta.outputs.tags }}
+          DIGEST: ${{ steps.build-and-push.outputs.digest }}
+        run: echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
